@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Hinge Tone</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh;
+      background: radial-gradient(ellipse at center, #1a1410 0%, #0a0808 100%);
+      color: #f4e4bc;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      cursor: pointer; user-select: none;
+    }
+    h1 {
+      font-weight: 200; letter-spacing: 0.4em; font-size: 0.9em;
+      color: #8a7a6a; margin: 0 0 4em;
+    }
+    .status {
+      position: fixed; top: 24px; right: 24px;
+      font-size: 0.75em; letter-spacing: 0.15em; text-transform: uppercase;
+      color: #6a8a6a;
+    }
+    .status.off { color: #8a6a6a; }
+    .status::before { content: "● "; }
+    .angle {
+      font-size: 8em; font-weight: 100; line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .angle .deg { font-size: 0.4em; color: #8a7a6a; margin-left: 0.1em; }
+    .note {
+      font-size: 2.4em; font-weight: 300; color: #d4a373;
+      letter-spacing: 0.1em; margin-top: 0.5em; min-height: 1.2em;
+    }
+    .freq { font-size: 0.85em; color: #6a5a4a; margin-top: 0.4em; }
+    .bar {
+      width: min(560px, 80vw); height: 6px; margin: 3em auto 1em;
+      background: rgba(244, 228, 188, 0.08); border-radius: 3px; overflow: hidden;
+    }
+    .fill {
+      height: 100%;
+      background: linear-gradient(90deg, #8a5a3a, #d4a373, #f4e4bc);
+      transition: width 0.08s linear;
+    }
+    .hint { color: #4a4036; font-size: 0.8em; margin-top: 3em; letter-spacing: 0.05em; }
+    .hint.armed { color: #6a8a6a; }
+    .range {
+      display: flex; justify-content: space-between; width: min(560px, 80vw);
+      color: #4a4036; font-size: 0.7em; margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+  </style>
+</head>
+<body>
+  <div class="status off" id="status">disconnected</div>
+  <h1>HINGE TONE</h1>
+  <div class="angle"><span id="angle">--</span><span class="deg">°</span></div>
+  <div class="note" id="note">—</div>
+  <div class="freq" id="freq"></div>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="range">
+    <span>60°</span><span>130°</span>
+  </div>
+  <p class="hint" id="hint">Click anywhere to start audio</p>
+
+  <script>
+    const MIN_ANGLE = 60;
+    const MAX_ANGLE = 130;
+    const MIN_FREQ = 130.81;  // C3
+    const MAX_FREQ = 523.25;  // C5
+    const FADE_BAND = 8;      // degrees below MIN_ANGLE where it fades out
+
+    const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const freqToNote = (f) => {
+      const n = Math.round(12 * Math.log2(f / 440)) + 69;
+      return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
+    };
+
+    let audioCtx = null, osc = null, gain = null;
+    let currentAngle = 0;
+    let targetFreq = MIN_FREQ;
+
+    const startAudio = () => {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      osc = audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = MIN_FREQ;
+      gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      const hint = document.getElementById('hint');
+      hint.textContent = 'Move the lid to change pitch';
+      hint.classList.add('armed');
+    };
+    document.body.addEventListener('click', startAudio);
+    document.body.addEventListener('keydown', startAudio);
+
+    const setStatus = (text, ok) => {
+      const el = document.getElementById('status');
+      el.textContent = text;
+      el.classList.toggle('off', !ok);
+    };
+
+    const ws = new WebSocket('ws://localhost:8765');
+    ws.onopen = () => setStatus('connected', true);
+    ws.onerror = () => setStatus('error', false);
+    ws.onclose = () => setStatus('disconnected', false);
+    ws.onmessage = (e) => {
+      const { angle } = JSON.parse(e.data);
+      currentAngle = angle;
+      const t = Math.max(0, Math.min(1, (angle - MIN_ANGLE) / (MAX_ANGLE - MIN_ANGLE)));
+      // exponential mapping → equal-tempered pitch feel
+      targetFreq = MIN_FREQ * Math.pow(MAX_FREQ / MIN_FREQ, t);
+
+      document.getElementById('angle').textContent = angle.toFixed(0);
+      document.getElementById('fill').style.width = (t * 100) + '%';
+      document.getElementById('note').textContent = freqToNote(targetFreq);
+      document.getElementById('freq').textContent = targetFreq.toFixed(1) + ' Hz';
+    };
+
+    // Smoothing loop — pybooklid yields integer degrees, so we glide
+    setInterval(() => {
+      if (!audioCtx) return;
+      osc.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.04);
+      // Fade out when nearly closed
+      const openness = Math.max(0, Math.min(1, (currentAngle - (MIN_ANGLE - FADE_BAND)) / FADE_BAND));
+      const targetGain = openness * 0.18;
+      gain.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.08);
+    }, 30);
+  </script>
+</body>
+</html>
